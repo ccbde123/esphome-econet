@@ -4,6 +4,8 @@
 #include "esphome/core/log.h"
 #include "esphome/components/climate/climate_traits.h"
 #include "econet_climate.h"
+#include <type_traits>
+#include <utility>
 
 using namespace esphome;
 
@@ -15,10 +17,45 @@ namespace {
 float fahrenheit_to_celsius(float f) { return (f - 32) * 5 / 9; }
 float celsius_to_fahrenheit(float c) { return c * 9 / 5 + 32; }
 
-template<class K, class V> std::set<V> map_values_as_set(std::map<K, V> map) {
-  std::set<V> v;
-  std::transform(map.begin(), map.end(), std::inserter(v, v.end()), [](const std::pair<K, V> &p) { return p.second; });
-  return v;
+template<typename...> struct dependent_false : std::false_type {};
+
+template<typename Container, typename Value, typename = void> struct has_insert : std::false_type {};
+
+template<typename Container, typename Value>
+struct has_insert<Container, Value, decltype(void(std::declval<Container &>().insert(std::declval<const Value &>())))>
+    : std::true_type {};
+
+template<typename Container, typename Value, typename = void> struct has_set : std::false_type {};
+
+template<typename Container, typename Value>
+struct has_set<Container, Value, decltype(void(std::declval<Container &>().set(std::declval<const Value &>())))>
+    : std::true_type {};
+
+template<typename Container, typename Value, typename = void> struct has_push_back : std::false_type {};
+
+template<typename Container, typename Value>
+struct has_push_back<Container, Value, decltype(void(std::declval<Container &>().push_back(std::declval<const Value &>())))>
+    : std::true_type {};
+
+template<typename Container, typename Value> void add_value(Container &container, const Value &value) {
+  if constexpr (has_insert<Container, Value>::value) {
+    container.insert(value);
+  } else if constexpr (has_push_back<Container, Value>::value) {
+    container.push_back(value);
+  } else if constexpr (has_set<Container, Value>::value) {
+    container.set(value);
+  } else {
+    static_assert(dependent_false<Container, Value>::value, "Unsupported container type for map conversion");
+  }
+}
+
+template<typename Container, typename Map> Container map_values_as_container(const Map &map) {
+  Container container{};
+  for (const auto &item : map) {
+    using ValueType = std::decay_t<decltype(item.second)>;
+    add_value<Container, ValueType>(container, item.second);
+  }
+  return container;
 }
 
 }  // namespace
@@ -37,13 +74,19 @@ climate::ClimateTraits EconetClimate::traits() {
   traits.set_supports_target_humidity(!target_dehumidification_level_id_.empty());
   traits.set_supports_two_point_target_temperature(!target_temperature_high_id_.empty());
   if (!mode_id_.empty()) {
-    traits.set_supported_modes(map_values_as_set(modes_));
+    using SupportedModesContainer =
+        std::decay_t<decltype(std::declval<const climate::ClimateTraits &>().get_supported_modes())>;
+    traits.set_supported_modes(map_values_as_container<SupportedModesContainer>(modes_));
   }
   if (!custom_preset_id_.empty()) {
-    traits.set_supported_custom_presets(map_values_as_set(custom_presets_));
+    using SupportedCustomPresetsContainer =
+        std::decay_t<decltype(std::declval<const climate::ClimateTraits &>().get_supported_custom_presets())>;
+    traits.set_supported_custom_presets(map_values_as_container<SupportedCustomPresetsContainer>(custom_presets_));
   }
   if (!custom_fan_mode_id_.empty()) {
-    traits.set_supported_custom_fan_modes(map_values_as_set(custom_fan_modes_));
+    using SupportedCustomFanModesContainer =
+        std::decay_t<decltype(std::declval<const climate::ClimateTraits &>().get_supported_custom_fan_modes())>;
+    traits.set_supported_custom_fan_modes(map_values_as_container<SupportedCustomFanModesContainer>(custom_fan_modes_));
   }
   return traits;
 }
